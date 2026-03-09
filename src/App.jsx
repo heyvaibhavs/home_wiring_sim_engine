@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
-import { Lightbulb, Fan, Zap, TriangleAlert, Info, MousePointer2, Square, Eraser, Play, Square as SquareIcon, PowerOff, Power, Hand, ZoomIn, ZoomOut, Maximize, Wind, Undo2, Redo2, Save, FolderOpen, Trash2, Edit2, X, Check } from 'lucide-react';
+import { Lightbulb, Fan, Zap, TriangleAlert, Info, MousePointer2, Square, Eraser, Play, Square as SquareIcon, PowerOff, Power, Hand, ZoomIn, ZoomOut, Maximize, Wind, Undo2, Redo2, Save, FolderOpen, Trash2, Edit2, X, Check, CircleDot } from 'lucide-react';
 
 // --- CONSTANTS & CONFIGURATIONS ---
 
@@ -15,6 +15,7 @@ const WIRE_TYPES = {
 const COMPONENT_DEF = {
   'source': { name: 'Main Power Source', width: 100, height: 80, color: 'bg-yellow-200 border-yellow-500' },
   'ac': { name: 'Air Conditioner', width: 120, height: 60, color: 'bg-white border-cyan-300' },
+  'joint': { name: 'Wire Splice', width: 20, height: 20, color: 'bg-neutral-500 border-neutral-400' },
   'bulb': { name: 'Bulb', width: 60, height: 60, color: 'bg-white border-yellow-300' },
   'fan': { name: 'Ceiling Fan', width: 80, height: 80, color: 'bg-white border-blue-300' },
   'socket_1': { name: '1 Socket Box', width: 80, height: 80, color: 'bg-gray-100 border-gray-400', sockets: 1, switches: 0 },
@@ -33,6 +34,8 @@ const generateTerminals = (type, width, height) => {
   if (type === 'source') {
     terminals.push({ id: 'L', type: 'L', label: 'L', x: 25, y: height - 15, color: 'bg-red-500' });
     terminals.push({ id: 'N', type: 'N', label: 'N', x: 75, y: height - 15, color: 'bg-gray-800' });
+  } else if (type === 'joint') {
+    terminals.push({ id: 'center', type: 'joint', label: '', x: 10, y: 10, color: 'bg-transparent border-none opacity-0' });
   } else if (type === 'bulb' || type === 'fan' || type === 'ac') {
     terminals.push({ id: 'L', type: 'in', label: 'L', x: 15, y: 15, color: 'bg-red-200' });
     terminals.push({ id: 'N', type: 'in', label: 'N', x: width - 15, y: 15, color: 'bg-gray-300' });
@@ -213,6 +216,8 @@ export default function App() {
   
   // Storage State
   const [savedProjects, setSavedProjects] = useState([]);
+  const [currentProjectId, setCurrentProjectId] = useState(null);
+  const [isAutoSave, setIsAutoSave] = useState(false);
   const [isStorageModalOpen, setIsStorageModalOpen] = useState(false);
   const [newProjectName, setNewProjectName] = useState("");
   const [editingProjectId, setEditingProjectId] = useState(null);
@@ -276,6 +281,29 @@ export default function App() {
     if (stored) setSavedProjects(JSON.parse(stored));
   }, []);
 
+  const updateCurrentProject = useCallback(() => {
+    if (!currentProjectId) return;
+    setSavedProjects(prev => {
+      const updated = prev.map(p => 
+        p.id === currentProjectId 
+          ? { ...p, data: { components, wires, rooms }, updatedAt: new Date().toLocaleString() } 
+          : p
+      );
+      localStorage.setItem('wiringSimulatorProjects', JSON.stringify(updated));
+      return updated;
+    });
+  }, [currentProjectId, components, wires, rooms]);
+
+  // Auto Save Effect
+  useEffect(() => {
+    if (isAutoSave && currentProjectId) {
+      const timeout = setTimeout(() => {
+        updateCurrentProject();
+      }, 1000); // 1s debounce
+      return () => clearTimeout(timeout);
+    }
+  }, [components, wires, rooms, isAutoSave, currentProjectId, updateCurrentProject]);
+
   // Keyboard Shortcuts
   useEffect(() => {
     const handleKeyDown = (e) => {
@@ -321,6 +349,7 @@ export default function App() {
     const updated = [...savedProjects, newProject];
     setSavedProjects(updated);
     localStorage.setItem('wiringSimulatorProjects', JSON.stringify(updated));
+    setCurrentProjectId(newProject.id);
     setNewProjectName("");
   };
 
@@ -329,6 +358,7 @@ export default function App() {
     setComponents(proj.data.components || []);
     setWires(proj.data.wires || []);
     setRooms(proj.data.rooms || []);
+    setCurrentProjectId(proj.id);
     setIsStorageModalOpen(false);
   };
 
@@ -337,6 +367,7 @@ export default function App() {
     setSavedProjects(updated);
     localStorage.setItem('wiringSimulatorProjects', JSON.stringify(updated));
     setDeletingProjectId(null);
+    if (currentProjectId === id) setCurrentProjectId(null);
   };
 
   const saveRename = (id) => {
@@ -513,6 +544,59 @@ export default function App() {
     if (tool === 'eraser') {
       takeSnapshot();
       setWires(wires.filter(w => w.id !== wireId));
+    } else if (tool === 'wire') {
+      takeSnapshot();
+      const wire = wires.find(w => w.id === wireId);
+      if (!wire) return;
+      
+      const coords = getCanvasCoords(e.clientX, e.clientY);
+
+      // Find the closest wire segment to project the splice onto perfectly
+      const startCoords = getTerminalCoords(wire.from);
+      const endCoords = getTerminalCoords(wire.to);
+      const pts = [startCoords, ...(wire.waypoints || []), endCoords];
+
+      let minDist = Infinity;
+      let splitIndex = 0;
+      let projX = coords.x;
+      let projY = coords.y;
+
+      for (let i = 0; i < pts.length - 1; i++) {
+        const v = pts[i];
+        const w = pts[i+1];
+        const l2 = (w.x - v.x)**2 + (w.y - v.y)**2;
+        let t = 0;
+        if (l2 !== 0) {
+          t = ((coords.x - v.x) * (w.x - v.x) + (coords.y - v.y) * (w.y - v.y)) / l2;
+          t = Math.max(0, Math.min(1, t));
+        }
+        const proj = { x: v.x + t * (w.x - v.x), y: v.y + t * (w.y - v.y) };
+        const d = (coords.x - proj.x)**2 + (coords.y - proj.y)**2;
+        if (d < minDist) {
+          minDist = d;
+          splitIndex = i;
+          projX = proj.x;
+          projY = proj.y;
+        }
+      }
+      
+      const jointId = `joint-${Date.now()}`;
+      // Do not snap splice joint to grid to ensure it sits exactly on the custom drawn path
+      const newJoint = { id: jointId, type: 'joint', x: projX - 10, y: projY - 10, state: { switches: [] } };
+      
+      // Preserve existing path correctly
+      const waypoints1 = wire.waypoints ? wire.waypoints.slice(0, splitIndex) : [];
+      const waypoints2 = wire.waypoints ? wire.waypoints.slice(splitIndex) : [];
+
+      const wire1 = { id: `wire-${Date.now()}-1`, from: wire.from, to: `${jointId}-center`, type: wire.type, waypoints: waypoints1 };
+      const wire2 = { id: `wire-${Date.now()}-2`, from: `${jointId}-center`, to: wire.to, type: wire.type, waypoints: waypoints2 };
+      
+      setComponents(prev => [...prev, newJoint]);
+      setWires(prev => [...prev.filter(w => w.id !== wireId), wire1, wire2]);
+      
+      setSelectedWireType(wire.type);
+      setWireStart(`${jointId}-center`);
+      setCurrentWaypoints([]);
     }
   };
 
@@ -666,6 +750,7 @@ export default function App() {
                   {key === 'bulb' && <Lightbulb size={20} className="text-yellow-200" />}
                   {key === 'fan' && <Fan size={20} className="text-blue-200" />}
                   {key === 'ac' && <Wind size={20} className="text-cyan-300" />}
+                  {key === 'joint' && <CircleDot size={20} className="text-neutral-400" />}
                   {key.includes('box') || key.includes('socket') || key.includes('switch') ? <SquareIcon size={20} className="text-gray-400" /> : null}
                   <span className="text-sm">{def.name}</span>
                 </div>
@@ -701,11 +786,26 @@ export default function App() {
                 <button onClick={handleRedo} disabled={history.future.length === 0} className="p-1.5 text-neutral-400 hover:text-white disabled:opacity-30 disabled:hover:text-neutral-400 transition-colors rounded hover:bg-neutral-700" title="Redo (Ctrl+Y)"><Redo2 size={18} /></button>
               </div>
             )}
+            
+            {currentProjectId && !simulationActive && (
+              <div className="flex items-center gap-3 border-l border-neutral-700 pl-4 ml-2 animate-in fade-in">
+                <span className="text-xs font-bold text-neutral-400 truncate max-w-[120px]" title={savedProjects.find(p => p.id === currentProjectId)?.name}>
+                  {savedProjects.find(p => p.id === currentProjectId)?.name}
+                </span>
+                <button onClick={updateCurrentProject} className="text-blue-400 hover:text-blue-300 hover:bg-blue-900/30 p-1.5 rounded transition-colors" title="Save / Update Project">
+                  <Save size={16} />
+                </button>
+                <label className="flex items-center gap-1.5 text-xs text-neutral-300 cursor-pointer hover:text-white" title="Automatically save changes">
+                  <input type="checkbox" checked={isAutoSave} onChange={e => setIsAutoSave(e.target.checked)} className="rounded cursor-pointer accent-blue-500 w-3.5 h-3.5" />
+                  Auto-save
+                </label>
+              </div>
+            )}
           </div>
           
           <div className="flex items-center gap-4">
             <div className="text-sm text-neutral-400 hidden lg:flex items-center gap-2">
-              <Info size={16} /> Tip: Click canvas while wiring to add custom corners.
+              <Info size={16} /> Tip: Click on a wire with the Wire Tool to splice it.
             </div>
             <button onClick={() => setIsStorageModalOpen(true)} className="flex items-center gap-2 text-sm font-bold text-neutral-300 hover:text-white bg-neutral-700/50 border border-neutral-600 hover:bg-neutral-600 px-4 py-1.5 rounded transition-colors shadow-sm">
               <FolderOpen size={16} /> Projects
@@ -757,7 +857,7 @@ export default function App() {
                 const isShorted = simulationActive && simResult.status === 'SHORT_CIRCUIT';
                 
                 return (
-                  <g key={w.id} onClick={(e) => handleWireClick(e, w.id)} style={{ pointerEvents: tool === 'eraser' ? 'stroke' : 'none' }} className={tool === 'eraser' ? 'cursor-pointer hover:opacity-50' : ''}>
+                  <g key={w.id} onClick={(e) => handleWireClick(e, w.id)} style={{ pointerEvents: (tool === 'eraser' || tool === 'wire') ? 'stroke' : 'none' }} className={(tool === 'eraser' || tool === 'wire') ? 'cursor-pointer hover:opacity-50' : ''}>
                     <path d={renderWirePath(start, w.waypoints, end)} fill="none" stroke="transparent" strokeWidth="20" strokeLinejoin="round" strokeLinecap="round" />
                     <path 
                       d={renderWirePath(start, w.waypoints, end)} 
@@ -794,14 +894,14 @@ export default function App() {
                 <div 
                   key={comp.id}
                   onMouseDown={(e) => handleComponentMouseDown(e, comp)}
-                  className={`absolute rounded-lg border-2 shadow-lg flex flex-col items-center justify-center transition-all z-20 ${def.color} ${isHoveredDelete ? 'opacity-50 border-red-500 cursor-cell' : tool === 'select' ? 'cursor-grab active:cursor-grabbing' : ''}`}
+                  className={`absolute ${comp.type === 'joint' ? 'rounded-full' : 'rounded-lg'} border-2 shadow-lg flex flex-col items-center justify-center transition-all z-20 ${def.color} ${isHoveredDelete ? 'opacity-50 border-red-500 cursor-cell' : tool === 'select' ? 'cursor-grab active:cursor-grabbing' : ''}`}
                   style={{ 
                     left: comp.x, top: comp.y, width: def.width, height: def.height,
-                    boxShadow: isPowered && comp.type !== 'bulb' ? `0 0 20px 5px rgba(74, 222, 128, 0.4)` : 'none',
-                    borderColor: isPowered && comp.type !== 'bulb' ? '#4ade80' : ''
+                    boxShadow: isPowered && comp.type !== 'bulb' && comp.type !== 'joint' ? `0 0 20px 5px rgba(74, 222, 128, 0.4)` : 'none',
+                    borderColor: isPowered && comp.type !== 'bulb' && comp.type !== 'joint' ? '#4ade80' : ''
                   }}
                 >
-                  <span className="text-[10px] font-bold absolute -top-5 text-neutral-400 bg-neutral-900 px-1 rounded whitespace-nowrap">{def.name}</span>
+                  {comp.type !== 'joint' && <span className="text-[10px] font-bold absolute -top-5 text-neutral-400 bg-neutral-900 px-1 rounded whitespace-nowrap">{def.name}</span>}
                   
                   {/* Visual rendering of component internals */}
                   {comp.type === 'source' && (
@@ -823,6 +923,9 @@ export default function App() {
                       <Wind size={24} className={`transition-all duration-500 ${isPowered ? 'text-cyan-500 animate-pulse' : 'text-gray-300'}`} />
                       <span className={`text-[9px] font-bold mt-1 ${isPowered ? 'text-cyan-600' : 'text-gray-400'}`}>2.0 TON AC</span>
                     </div>
+                  )}
+                  {comp.type === 'joint' && (
+                    <CircleDot size={12} className="text-neutral-200" />
                   )}
 
                   {/* Draw Switches and Sockets within Boxes */}
